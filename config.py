@@ -46,15 +46,20 @@ HP_BOUNDS = {
 
 # CSV column alias mappings for user-uploaded CSVs
 CSV_ALIASES = {
-    'latitude': ['latitude', 'lat', 'y', 'northing'],
-    'longitude': ['longitude', 'lon', 'long', 'x', 'easting'],
-    'slope_deg': ['slope_deg', 'slope', 'slope_degrees', 'slope_angle'],
-    'elevation_m': ['elevation_m', 'elevation', 'altitude', 'elev', 'dem'],
-    'aspect_deg': ['aspect_deg', 'aspect', 'aspect_degrees'],
-    'Rainfall_z': ['rainfall_z', 'rain_z', 'rainfall', 'precip_z'],
-    'NDVI_z': ['ndvi_z', 'ndvi', 'veg_index'],
-    'Dist_River_z': ['dist_river_z', 'dist_river', 'distance_to_river_z', 'drainage_dist_z'],
-    'FlowAccumulation_z': ['flowaccumulation_z', 'flow_accumulation_z', 'flow_acc_z']
+    'latitude': ['latitude', 'lat', 'latitude_deg', 'lat_deg'],
+    'longitude': ['longitude', 'lon', 'long', 'longitude_deg', 'lon_deg'],
+    'slope_deg': ['slope_deg', 'slope', 'slope_degrees', 'slope_angle', 'slope_angle_deg'],
+    'elevation_m': ['elevation_m', 'elevation', 'altitude', 'elev', 'dem', 'elevation_meters'],
+    'aspect_deg': ['aspect_deg', 'aspect', 'aspect_degrees', 'aspect_degree'],
+    'Aspect_z': ['aspect_z'],
+    'Elevation_z': ['elevation_z', 'elev_z'],
+    'Slope_z': ['slope_z'],
+    'Rainfall_z': ['rainfall_z', 'rain_z', 'precip_z'],
+    'NDVI_z': ['ndvi_z'],
+    'Dist_River_z': ['dist_river_z', 'distance_to_river_z', 'drainage_dist_z'],
+    'FlowAccumulation_z': ['flowaccumulation_z', 'flow_accumulation_z', 'flow_acc_z'],
+    'lulc_code': ['lulc_code', 'landcover_code', 'land_use_code'],
+    'city': ['city', 'city_name', 'town', 'municipality']
 }
 
 # Geotechnical baseline constants

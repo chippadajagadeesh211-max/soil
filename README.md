@@ -172,6 +172,35 @@ streamlit run app.py
 ```
 Open your browser at `http://localhost:8501`.
 
+### Upload a city dataset
+Use the **Dataset City** selector in the sidebar to choose Eluru, Vijayawada, or
+Rajamahendravaram, then upload that city's CSV. If the CSV has a `city` column,
+the dashboard filters it to the selected city; otherwise, the selected city is
+the upload label. Choose a row in **Prediction input row** to drive the
+prediction inputs, environmental chart, and map selection. The active upload's
+record count, city, source columns, and preview are shown above the dashboard.
+
+Uploads must include `latitude`, `longitude`, and the model's environmental
+features: `Aspect_z`, `Dist_River_z`, `Elevation_z`, `FlowAccumulation_z`,
+`NDVI_z`, `Rainfall_z`, `Slope_z`, `aspect_deg`, `elevation_m`, and `slope_deg`,
+plus `LULC_10` through `LULC_100` or a `lulc_code` from 10 to 100 in steps of
+10. The Z-scores for aspect, elevation, and slope can be derived from their raw
+columns when omitted. Other missing, invalid, or non-numeric model inputs are
+reported and are not imputed. Coordinates and all AI features are required;
+files without them are rejected instead of being assigned fabricated values.
+Only CSV files are accepted (not Excel workbooks). An optional binary `class`
+column is used only for map categories and record counts.
+
+Uploads whose filename or `data_status` identifies them as synthetic/demo or
+not observed are clearly labeled. They may be used for interface testing but
+must not be treated as real-world city measurements. The dashboard does not
+train its model on an uploaded file.
+
+The bundled classifier was trained on the Himachal Pradesh dataset, not on
+these city datasets. Uploaded-city predictions are therefore exploratory and
+are not locally validated. The bundled GSI historical inventory is also
+Himachal-only and is not queried for uploaded city records.
+
 ### 5. Deploy publicly with Streamlit Community Cloud
 1. Push this repository to GitHub.
 2. Sign in at [share.streamlit.io](https://share.streamlit.io/) and connect GitHub.

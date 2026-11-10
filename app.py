@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 # SlopeGuard AI Modular System
-from config import HP_CENTER, HP_BOUNDS, FEATURE_COLUMNS, CSV_ALIASES
+from config import HP_CENTER, HP_BOUNDS
 from modules.data_loader import (
     load_primary_dataset,
     load_historical_inventory,
@@ -24,10 +24,9 @@ from modules.model_training import train_and_evaluate_models
 from modules.prediction import (
     load_prediction_model,
     predict_susceptibility,
-    predict_batch_csv,
     classify_susceptibility
 )
-from modules.preprocessing import remap_uploaded_csv_columns, prepare_feature_tensor
+from modules.preprocessing import validate_uploaded_dataset
 from modules.gis_mapping import (
     find_nearest_dataset_sample,
     create_gis_risk_map
@@ -297,14 +296,6 @@ if "ext_params" not in st.session_state:
         "water_loading": "Parallel Seepage"
     }
 
-# Synchronize nearest dataset sample
-st.session_state.current_sample = find_nearest_dataset_sample(
-    st.session_state.selected_lat,
-    st.session_state.selected_lon,
-    df_modelling
-)
-
-
 # ==========================================
 # COMPACT LEFT NAVIGATION (PART 3)
 # ==========================================
@@ -319,6 +310,17 @@ with st.sidebar:
         </span>
     </div>
     """, unsafe_allow_html=True)
+
+    selected_city = st.selectbox(
+        "Dataset City",
+        ["Himachal Pradesh (Built-in)", "Eluru", "Vijayawada", "Rajamahendravaram"],
+        help="For the three Andhra Pradesh cities, upload the corresponding CSV below."
+    )
+    uploaded_file = st.file_uploader(
+        "Upload CSV for selected city",
+        type=["csv"],
+        help="Upload one city's CSV. Coordinates and all AI model features are required."
+    )
 
     nav_page = st.radio(
         "Application Navigation",
@@ -338,29 +340,106 @@ with st.sidebar:
         index=0
     )
 
-    st.markdown("---")
-    st.markdown("#### 📍 Hotspot Fast-Picker")
-    preset_sel = st.selectbox("Himachal Pradesh Hotspot", list(PRESETS.keys()), index=0)
-    if preset_sel != st.session_state.selected_preset and PRESETS[preset_sel] is not None:
-        st.session_state.selected_preset = preset_sel
-        st.session_state.selected_lat = PRESETS[preset_sel]["lat"]
-        st.session_state.selected_lon = PRESETS[preset_sel]["lon"]
-        st.session_state.current_sample = find_nearest_dataset_sample(
-            st.session_state.selected_lat,
-            st.session_state.selected_lon,
-            df_modelling
-        )
-        st.session_state.geo_params["slope_deg"] = float(st.session_state.current_sample.get("slope_deg", 28.5))
+    if selected_city == "Himachal Pradesh (Built-in)":
+        st.markdown("---")
+        st.markdown("#### 📍 Hotspot Fast-Picker")
+        preset_sel = st.selectbox("Himachal Pradesh Hotspot", list(PRESETS.keys()), index=0)
+        if preset_sel != st.session_state.selected_preset and PRESETS[preset_sel] is not None:
+            st.session_state.selected_preset = preset_sel
+            st.session_state.selected_lat = PRESETS[preset_sel]["lat"]
+            st.session_state.selected_lon = PRESETS[preset_sel]["lon"]
+            st.session_state.geo_params["slope_deg"] = float(
+                find_nearest_dataset_sample(
+                    st.session_state.selected_lat,
+                    st.session_state.selected_lon,
+                    df_modelling
+                ).get("slope_deg", 28.5)
+            )
 
-    st.markdown("---")
-    st.markdown("""
-    <div style='font-size:0.75rem; color:#64748b; line-height:1.5;'>
-        <strong>Hackathon Theme:</strong> AI in Civil Engineering<br>
-        <strong>Primary Dataset:</strong> 12,409 Samples<br>
-        <strong>GSI Inventory:</strong> 6,539 Records<br>
-        <strong>Status:</strong> Models Live in Memory
-    </div>
-    """, unsafe_allow_html=True)
+        st.markdown("---")
+        st.markdown("""
+        <div style='font-size:0.75rem; color:#64748b; line-height:1.5;'>
+            <strong>Hackathon Theme:</strong> AI in Civil Engineering<br>
+            <strong>Primary Dataset:</strong> 12,409 Samples<br>
+            <strong>GSI Inventory:</strong> 6,539 Records<br>
+            <strong>Status:</strong> Models Live in Memory
+        </div>
+        """, unsafe_allow_html=True)
+
+    with st.expander("CSV schema requirements"):
+        st.caption(
+            "Required: latitude and longitude for mapping; Aspect_z, Dist_River_z, Elevation_z, "
+            "FlowAccumulation_z, NDVI_z, Rainfall_z, Slope_z; aspect_deg, elevation_m, "
+            "slope_deg; and LULC_10 through LULC_100 (or lulc_code). Raw aspect/elevation/"
+            "slope may supply their corresponding Z-scores. No missing or non-numeric "
+            "model inputs are filled automatically."
+        )
+
+
+is_uploaded_dataset = selected_city != "Himachal Pradesh (Built-in)"
+if is_uploaded_dataset:
+    if uploaded_file is None:
+        st.sidebar.error(f"Upload a CSV dataset for {selected_city} to continue.")
+        st.stop()
+    try:
+        uploaded_file.seek(0)
+        uploaded_raw = pd.read_csv(uploaded_file)
+        uploaded_dataset = validate_uploaded_dataset(uploaded_raw)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError, UnicodeDecodeError, ValueError) as exc:
+        st.sidebar.error(f"Unable to use this CSV: {exc}")
+        st.stop()
+
+    if 'city' in uploaded_dataset:
+        city_values = uploaded_dataset['city'].astype(str).str.strip().str.casefold()
+        city_rows = city_values == selected_city.casefold()
+        if not city_rows.any():
+            available_cities = ", ".join(sorted(uploaded_dataset['city'].dropna().astype(str).unique()))
+            st.sidebar.error(
+                f"No rows for {selected_city} were found in the CSV. "
+                f"Available city values: {available_cities or 'none'}."
+            )
+            st.stop()
+        uploaded_raw = uploaded_raw.loc[city_rows].reset_index(drop=True)
+        uploaded_dataset = uploaded_dataset.loc[city_rows].reset_index(drop=True)
+
+    active_dataset = uploaded_dataset
+    active_city = selected_city
+    row_options = list(range(len(active_dataset)))
+    selected_row = st.sidebar.selectbox(
+        "Prediction input row",
+        row_options,
+        format_func=lambda row: (
+            f"Row {row + 1} — {active_dataset.iloc[row]['latitude']:.5f}, "
+            f"{active_dataset.iloc[row]['longitude']:.5f}"
+        ),
+        key=f"uploaded_dataset_row_{selected_city}_{uploaded_file.name}"
+    )
+    st.session_state.current_sample = active_dataset.iloc[selected_row].copy()
+    st.session_state.selected_lat = float(st.session_state.current_sample['latitude'])
+    st.session_state.selected_lon = float(st.session_state.current_sample['longitude'])
+    selection_key = (selected_city, uploaded_file.name, selected_row)
+    if st.session_state.get("_uploaded_selection_key") != selection_key:
+        st.session_state.geo_params["slope_deg"] = float(
+            st.session_state.current_sample["slope_deg"]
+        )
+        st.session_state["_uploaded_selection_key"] = selection_key
+    st.sidebar.metric("Uploaded records", f"{len(active_dataset):,}")
+    st.sidebar.caption(f"Selected city: {active_city} · Row {selected_row + 1}")
+    st.sidebar.caption(
+        "Available parameters: " + ", ".join(
+            str(column) for column in uploaded_raw.columns
+        )
+    )
+else:
+    active_dataset = df_modelling
+    active_city = "Himachal Pradesh"
+    if uploaded_file is not None:
+        st.sidebar.info("Choose an Andhra Pradesh city above to activate its uploaded CSV.")
+    st.session_state.current_sample = find_nearest_dataset_sample(
+        st.session_state.selected_lat,
+        st.session_state.selected_lon,
+        active_dataset
+    )
 
 
 # ==========================================
@@ -379,6 +458,42 @@ geo_res = calculate_factor_of_safety(
 fs_val = geo_res["fs"]
 fs_eval = classify_fs_condition(fs_val)
 dual_res = evaluate_dual_risk_engine(ai_res["probability"], fs_val)
+active_record_count = len(active_dataset)
+if 'class' in active_dataset:
+    class_1_count = int((active_dataset['class'] == 1).sum())
+    class_0_count = int((active_dataset['class'] == 0).sum())
+else:
+    class_1_count = None
+    class_0_count = None
+
+if is_uploaded_dataset:
+    st.markdown(f"## {active_city} CSV dataset")
+    upload_metrics = st.columns(3)
+    upload_metrics[0].metric("Total records", f"{active_record_count:,}")
+    upload_metrics[1].metric("Selected city", active_city)
+    upload_metrics[2].metric("Available parameters", f"{len(uploaded_raw.columns):,}")
+    st.caption("CSV columns: " + ", ".join(str(column) for column in uploaded_raw.columns))
+    with st.expander("Preview uploaded dataset", expanded=False):
+        st.dataframe(uploaded_raw.head(50), use_container_width=True, height=280)
+
+    upload_provenance = " ".join(
+        [uploaded_file.name]
+        + [str(value) for value in uploaded_raw.get("data_status", pd.Series(dtype=str)).dropna().unique()]
+    ).casefold()
+    if "synthetic" in upload_provenance or "not_observed" in upload_provenance or "demo" in upload_provenance:
+        st.warning(
+            "This upload identifies itself as synthetic/demo or not observed. "
+            "It is shown only as supplied and must not be interpreted as measured real-world city data."
+        )
+    st.info(
+        "AI probabilities use the existing model trained on Himachal Pradesh data. "
+        "They are exploratory for uploaded-city data and are not locally validated."
+    )
+    st.warning(
+        "Engineering Factor of Safety and external-load scenarios use the editable values "
+        "on Input Parameters, not measurements inferred from this CSV. The displayed "
+        "defaults are not verified measurements for the selected city."
+    )
 
 
 # ==========================================
@@ -386,7 +501,7 @@ dual_res = evaluate_dual_risk_engine(ai_res["probability"], fs_val)
 # ==========================================
 if nav_page == "1. Main Dashboard":
 
-    st.markdown("""
+    st.markdown(f"""
     <div class="hero-container">
         <h1 class="hero-title">SLOPEGUARD <span class="cyan">AI</span></h1>
         <div style="font-size:1.15rem; color:#e2e8f0; font-weight:600; margin-top:4px;">
@@ -396,7 +511,7 @@ if nav_page == "1. Main Dashboard":
             “Predict Before Failure. Monitor Before Disaster.”
         </div>
         <div class="hero-subtitle">
-            An operational AI in Civil Engineering decision system combining Google Earth Engine terrain features with Mohr-Coulomb geotechnical limit equilibrium.
+            {'Uploaded city dataset with Mohr-Coulomb engineering analysis; AI output uses the existing Himachal Pradesh-trained model.' if is_uploaded_dataset else 'An operational AI in Civil Engineering decision system combining Google Earth Engine terrain features with Mohr-Coulomb geotechnical limit equilibrium.'}
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -407,8 +522,8 @@ if nav_page == "1. Main Dashboard":
         run_full_btn = st.button("🚀 RUN COMPLETE SLOPEGUARD ANALYSIS", type="primary", use_container_width=True)
     with b_col2:
         st.markdown(
-            "<div style='font-size:0.86rem; color:#94a3b8; padding-top:8px;'>"
-            "Executes genuine 10-stage workflow: Feature extraction → Tensor alignment → ML prediction → Mohr-Coulomb FS → Dual Risk synthesis → GSI inventory query."
+            f"<div style='font-size:0.86rem; color:#94a3b8; padding-top:8px;'>"
+            f"{'Uses the selected uploaded row for feature alignment, model inference, engineering analysis, and mapping.' if is_uploaded_dataset else 'Executes the Himachal Pradesh workflow: feature alignment → ML prediction → Mohr-Coulomb FS → Dual Risk synthesis → GSI inventory query.'}"
             "</div>",
             unsafe_allow_html=True
         )
@@ -419,17 +534,26 @@ if nav_page == "1. Main Dashboard":
             st.info("🔄 Executing Complete SlopeGuard Pipeline...")
             p_bar = st.progress(0)
             status_t = st.empty()
-            workflow_steps = [
-                ("1. Validating target location coordinates in Himachal Pradesh...", 10),
-                ("2. Extracting Google Earth Engine 30m environmental feature tensor...", 20),
-                ("3. Applying standardized Z-score preprocessing & float64 casting...", 35),
-                ("4. Executing trained machine learning inference (XGBoost/RF)...", 50),
-                ("5. Calculating statistical landslide susceptibility probability...", 65),
-                ("6. Evaluating Mohr-Coulomb geotechnical Factor of Safety (FS)...", 75),
-                ("7. Querying 6,539 Geological Survey of India historical records...", 85),
-                ("8. Evaluating 4x4 Dual Risk Engine cross-domain matrix...", 92),
-                ("9. Generating prioritized early warning & emergency directives...", 100)
-            ]
+            if is_uploaded_dataset:
+                workflow_steps = [
+                    ("1. Validating uploaded CSV coordinates and required feature columns...", 15),
+                    ("2. Aligning the selected uploaded row to model feature order...", 35),
+                    ("3. Executing trained machine learning inference...", 60),
+                    ("4. Calculating engineering Factor of Safety from user inputs...", 80),
+                    ("5. Rendering the uploaded city dataset and selected prediction...", 100)
+                ]
+            else:
+                workflow_steps = [
+                    ("1. Validating target location coordinates in Himachal Pradesh...", 10),
+                    ("2. Extracting Google Earth Engine 30m environmental feature tensor...", 20),
+                    ("3. Applying standardized Z-score preprocessing & float64 casting...", 35),
+                    ("4. Executing trained machine learning inference (XGBoost/RF)...", 50),
+                    ("5. Calculating statistical landslide susceptibility probability...", 65),
+                    ("6. Evaluating Mohr-Coulomb geotechnical Factor of Safety (FS)...", 75),
+                    ("7. Querying 6,539 Geological Survey of India historical records...", 85),
+                    ("8. Evaluating 4x4 Dual Risk Engine cross-domain matrix...", 92),
+                    ("9. Generating prioritized early warning & emergency directives...", 100)
+                ]
             for desc, pct in workflow_steps:
                 status_t.markdown(f"**Step:** {desc}")
                 p_bar.progress(pct)
@@ -446,24 +570,24 @@ if nav_page == "1. Main Dashboard":
         st.markdown(f"""
         <div class="kpi-card">
             <div class="kpi-label">Total Samples</div>
-            <div class="kpi-value" style="color:#38bdf8;">12,409</div>
-            <div class="kpi-sub">Himachal Pradesh</div>
+            <div class="kpi-value" style="color:#38bdf8;">{active_record_count:,}</div>
+            <div class="kpi-sub">{active_city}</div>
         </div>
         """, unsafe_allow_html=True)
     with k2:
         st.markdown(f"""
         <div class="kpi-card">
-            <div class="kpi-label">Landslide Samples</div>
-            <div class="kpi-value" style="color:#f97316;">6,531</div>
-            <div class="kpi-sub">Class 1 Confirmed</div>
+            <div class="kpi-label">{'Landslide Samples' if not is_uploaded_dataset else 'Class 1 Samples'}</div>
+            <div class="kpi-value" style="color:#f97316;">{f'{class_1_count:,}' if class_1_count is not None else 'N/A'}</div>
+            <div class="kpi-sub">{'Class 1 confirmed in source dataset' if not is_uploaded_dataset else 'Source label; not independently verified'}</div>
         </div>
         """, unsafe_allow_html=True)
     with k3:
         st.markdown(f"""
         <div class="kpi-card">
-            <div class="kpi-label">Non-Landslide</div>
-            <div class="kpi-value" style="color:#38bdf8;">5,878</div>
-            <div class="kpi-sub">Class 0 Pseudo-Absence</div>
+            <div class="kpi-label">{'Non-Landslide' if not is_uploaded_dataset else 'Class 0 Samples'}</div>
+            <div class="kpi-value" style="color:#38bdf8;">{f'{class_0_count:,}' if class_0_count is not None else 'N/A'}</div>
+            <div class="kpi-sub">{'Class 0 pseudo-absence' if not is_uploaded_dataset else 'Source label; not independently verified'}</div>
         </div>
         """, unsafe_allow_html=True)
     with k4:
@@ -497,21 +621,27 @@ if nav_page == "1. Main Dashboard":
     c_map_col, c_pred_col = st.columns([1.65, 1.0])
 
     with c_map_col:
-        st.markdown("""
+        st.markdown(f"""
         <div class="section-card" style="padding:16px;">
             <div class="section-header">
-                <span>🗺️ Central GIS Risk Map — Himachal Pradesh</span>
+                <span>🗺️ Central GIS Risk Map — {active_city}</span>
                 <span style="font-size:0.8rem; color:#94a3b8; font-weight:500;">WGS84 • EPSG:4326</span>
             </div>
-        """, unsafe_allow_html=True)
+            """, unsafe_allow_html=True)
         fig_gis = create_gis_risk_map(
-            df_modelling,
+            active_dataset,
             selected_lat=st.session_state.selected_lat,
             selected_lon=st.session_state.selected_lon,
-            selected_probability_pct=ai_res['percentage']
+            selected_probability_pct=ai_res['percentage'],
+            uploaded_dataset=is_uploaded_dataset
         )
         st.plotly_chart(fig_gis, use_container_width=True)
-        st.caption("🟠 Orange: Verified Landslide Occurrences | 🔵 Cyan: Reference Terrain Points | 🟡 Gold: Selected Target Site")
+        if is_uploaded_dataset and 'class' not in active_dataset:
+            st.caption("🔵 Uploaded CSV coordinates | 🟡 Selected prediction input")
+        elif is_uploaded_dataset:
+            st.caption("🟠 CSV class 1 | 🔵 CSV class 0 | 🟡 Selected prediction input")
+        else:
+            st.caption("🟠 Orange: Verified Landslide Occurrences | 🔵 Cyan: Reference Terrain Points | 🟡 Gold: Selected Target Site")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with c_pred_col:
@@ -536,14 +666,14 @@ if nav_page == "1. Main Dashboard":
                     {ai_res['prediction_text']}
                 </div>
                 <div style="font-size:0.8rem; color:#64748b; margin-top:8px;">
-                    Model: <strong>XGBoost / Random Forest</strong> (Trained on 12,409 HP samples)
+                    Model: <strong>XGBoost / Random Forest</strong> (trained on Himachal Pradesh data)
                 </div>
             </div>
             <hr style="border-color:#1e293b; margin:14px 0;">
             <div style="font-size:0.82rem; color:#cbd5e1; line-height:1.6;">
                 • Target Coordinates: <code>{st.session_state.selected_lat:.5f}°N, {st.session_state.selected_lon:.5f}°E</code><br>
-                • Distance to Nearest Dataset Node: <code>{cur_sample.get('distance_to_target_km', 0.0):.2f} km</code><br>
-                • Land Cover (Copernicus): <code>{cur_sample.get('lulc_name', 'Tree cover')}</code>
+                {'• Selected input: <code>uploaded CSV row</code><br>' if is_uploaded_dataset else f"• Distance to Nearest Dataset Node: <code>{cur_sample['distance_to_target_km']:.2f} km</code><br>"}
+                • Land Cover: <code>{cur_sample.get('lulc_name', 'Not provided')}</code>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -611,7 +741,7 @@ if nav_page == "1. Main Dashboard":
         st.write(f"• Surcharge Load: **{st.session_state.ext_params['surcharge_kpa']:.1f} kPa**")
         st.write(f"• Seismic Coefficient (kh): **{st.session_state.ext_params['seismic_kh']:.2f}**")
         st.write(f"• Water Loading Condition: **{st.session_state.ext_params['water_loading']}**")
-        st.write("• Input Source: **Dataset-derived + User Engineering**")
+        st.write(f"• Input Source: **{active_city} dataset + User Engineering**")
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.write("")
@@ -621,20 +751,29 @@ if nav_page == "1. Main Dashboard":
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ENVIRONMENTAL ANALYSIS CHARTS
-    st.markdown("""
+    st.markdown(f"""
     <div class="section-card">
         <div class="section-header">
-            <span>📊 Environmental Factors Analysis (Relative to Himachal Pradesh Baseline)</span>
+            <span>📊 Environmental Factors Analysis ({'uploaded row values' if is_uploaded_dataset else 'Relative to Himachal Pradesh Baseline'})</span>
         </div>
     """, unsafe_allow_html=True)
 
-    env_bars = [
-        ("Slope Steepness", float(cur_sample.get('slope_deg', 25.0)) / 26.79, f"{cur_sample.get('slope_deg', 25.0):.1f}° (State mean 26.8°)"),
-        ("Elevation Gradient", float(cur_sample.get('elevation_m', 1500.0)) / 1780.14, f"{cur_sample.get('elevation_m', 1500.0):.0f} m (State mean 1780 m)"),
-        ("Monsoon Rainfall", 1.0 + float(cur_sample.get('Rainfall_z', 0.0)) * 0.35, f"Z: {cur_sample.get('Rainfall_z', 0.0):+.2f}"),
-        ("Vegetation Density (NDVI)", 1.0 + float(cur_sample.get('NDVI_z', 0.0)) * 0.35, f"Z: {cur_sample.get('NDVI_z', 0.0):+.2f}"),
-        ("River Network Proximity", 1.0 - float(cur_sample.get('Dist_River_z', 0.0)) * 0.35, f"Z: {cur_sample.get('Dist_River_z', 0.0):+.2f}")
-    ]
+    if is_uploaded_dataset:
+        env_bars = [
+            ("Slope (degrees)", float(cur_sample['slope_deg']), f"{cur_sample['slope_deg']:.2f}"),
+            ("Elevation (m)", float(cur_sample['elevation_m']), f"{cur_sample['elevation_m']:.2f}"),
+            ("Rainfall Z-score", float(cur_sample['Rainfall_z']), f"{cur_sample['Rainfall_z']:.3f}"),
+            ("NDVI Z-score", float(cur_sample['NDVI_z']), f"{cur_sample['NDVI_z']:.3f}"),
+            ("River Distance Z-score", float(cur_sample['Dist_River_z']), f"{cur_sample['Dist_River_z']:.3f}")
+        ]
+    else:
+        env_bars = [
+            ("Slope Steepness", float(cur_sample.get('slope_deg', 25.0)) / 26.79, f"{cur_sample.get('slope_deg', 25.0):.1f}° (State mean 26.8°)"),
+            ("Elevation Gradient", float(cur_sample.get('elevation_m', 1500.0)) / 1780.14, f"{cur_sample.get('elevation_m', 1500.0):.0f} m (State mean 1780 m)"),
+            ("Monsoon Rainfall", 1.0 + float(cur_sample.get('Rainfall_z', 0.0)) * 0.35, f"Z: {cur_sample.get('Rainfall_z', 0.0):+.2f}"),
+            ("Vegetation Density (NDVI)", 1.0 + float(cur_sample.get('NDVI_z', 0.0)) * 0.35, f"Z: {cur_sample.get('NDVI_z', 0.0):+.2f}"),
+            ("River Network Proximity", 1.0 - float(cur_sample.get('Dist_River_z', 0.0)) * 0.35, f"Z: {cur_sample.get('Dist_River_z', 0.0):+.2f}")
+        ]
     fig_env = go.Figure(go.Bar(
         x=[b[1] for b in env_bars],
         y=[b[0] for b in env_bars],
@@ -643,14 +782,15 @@ if nav_page == "1. Main Dashboard":
         textposition='auto',
         marker=dict(color=['#f97316' if b[1] > 1.2 else '#38bdf8' for b in env_bars])
     ))
-    fig_env.add_vline(x=1.0, line_dash="dash", line_color="#94a3b8", annotation_text="State Mean (1.0)")
+    if not is_uploaded_dataset:
+        fig_env.add_vline(x=1.0, line_dash="dash", line_color="#94a3b8", annotation_text="State Mean (1.0)")
     fig_env.update_layout(
         height=260,
         margin=dict(l=10, r=10, t=20, b=10),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color="#f1f5f9"),
-        xaxis=dict(gridcolor="#1e293b", title="Ratio to State Mean")
+        xaxis=dict(gridcolor="#1e293b", title="Uploaded value (source unit / Z-score)" if is_uploaded_dataset else "Ratio to State Mean")
     )
     st.plotly_chart(fig_env, use_container_width=True)
     st.markdown("</div>", unsafe_allow_html=True)
@@ -663,10 +803,13 @@ if nav_page == "1. Main Dashboard":
         </div>
     """, unsafe_allow_html=True)
 
-    hist_main = query_nearby_historical_landslides(st.session_state.selected_lat, st.session_state.selected_lon, df_inventory, radius_km=10.0)
-    st.markdown(f"**Inventory Status:** {hist_main['message']}")
-    if hist_main['count'] > 0:
-        st.dataframe(pd.DataFrame(hist_main['records'])[['sno', 'slide_name', 'district', 'material', 'movement', 'year', 'distance_km']], use_container_width=True, height=180)
+    if is_uploaded_dataset:
+        st.info("The built-in GSI inventory covers Himachal Pradesh only; no historical inventory is assumed for this uploaded city dataset.")
+    else:
+        hist_main = query_nearby_historical_landslides(st.session_state.selected_lat, st.session_state.selected_lon, df_inventory, radius_km=10.0)
+        st.markdown(f"**Inventory Status:** {hist_main['message']}")
+        if hist_main['count'] > 0:
+            st.dataframe(pd.DataFrame(hist_main['records'])[['sno', 'slide_name', 'district', 'material', 'movement', 'year', 'distance_km']], use_container_width=True, height=180)
     st.markdown("</div>", unsafe_allow_html=True)
 
     # FINAL HACKATHON MESSAGE
@@ -714,21 +857,34 @@ elif nav_page == "2. Input Parameters":
                                     help="0.0 = Dry slope; 1.0 = Saturated ground surface with seepage parallel to slope")
 
     # B. GEO-ENVIRONMENTAL PARAMETERS EXPANDER
-    with st.expander("🌿 B. GEO-ENVIRONMENTAL PARAMETERS (Earth Observation Dataset Features)", expanded=True):
-        st.markdown("<div style='font-size:0.85rem; color:#94a3b8; margin-bottom:12px;'>Extracted from Google Earth Engine 30m resolution layers for the active location:</div>", unsafe_allow_html=True)
+    with st.expander(f"🌿 B. GEO-ENVIRONMENTAL PARAMETERS ({active_city} dataset features)", expanded=True):
+        source_note = (
+            "Values shown are taken from the selected uploaded CSV row."
+            if is_uploaded_dataset else
+            "Extracted from Google Earth Engine 30m resolution layers for the active location:"
+        )
+        st.markdown(f"<div style='font-size:0.85rem; color:#94a3b8; margin-bottom:12px;'>{source_note}</div>", unsafe_allow_html=True)
         e1, e2, e3 = st.columns(3)
         with e1:
             st.metric("Slope Angle (raw / Z-score)", f"{cur_sample.get('slope_deg', 0.0):.1f}°", f"Z: {cur_sample.get('Slope_z', 0.0):+.2f}σ")
             st.metric("Elevation (raw / Z-score)", f"{cur_sample.get('elevation_m', 0.0):.0f} m", f"Z: {cur_sample.get('Elevation_z', 0.0):+.2f}σ")
             st.metric("Aspect (raw / Z-score)", f"{cur_sample.get('aspect_deg', 0.0):.0f}°", f"Z: {cur_sample.get('Aspect_z', 0.0):+.2f}σ")
         with e2:
-            st.metric("Rainfall Z-Score", f"{cur_sample.get('Rainfall_z', 0.0):+.2f}σ", "CHIRPS Monsoon")
-            st.metric("NDVI Vegetation Z-Score", f"{cur_sample.get('NDVI_z', 0.0):+.2f}σ", "Sentinel-2 NIR/Red")
-            st.metric("Distance to River Z-Score", f"{cur_sample.get('Dist_River_z', 0.0):+.2f}σ", "HydroSHEDS")
+            source_suffix = "Uploaded CSV" if is_uploaded_dataset else None
+            st.metric("Rainfall Z-Score", f"{cur_sample.get('Rainfall_z', 0.0):+.2f}σ", source_suffix or "CHIRPS Monsoon")
+            st.metric("NDVI Vegetation Z-Score", f"{cur_sample.get('NDVI_z', 0.0):+.2f}σ", source_suffix or "Sentinel-2 NIR/Red")
+            st.metric("Distance to River Z-Score", f"{cur_sample.get('Dist_River_z', 0.0):+.2f}σ", source_suffix or "HydroSHEDS")
         with e3:
             st.metric("Flow Accumulation Z-Score", f"{cur_sample.get('FlowAccumulation_z', 0.0):+.2f}σ", "Catchment Upstream")
-            st.metric("Land Cover (Copernicus LULC)", f"{cur_sample.get('lulc_name', 'Tree cover')}", f"Code: {cur_sample.get('lulc_code', 10)}")
-            st.markdown("<span style='font-size:0.75rem; color:#38bdf8;'>Source: GEE 30m Multi-Sensor Dataset</span>", unsafe_allow_html=True)
+            st.metric(
+                "Land Cover (Copernicus LULC)",
+                f"{cur_sample.get('lulc_name', 'Not provided')}",
+                f"Code: {cur_sample.get('lulc_code', 'Not provided')}"
+            )
+            st.markdown(
+                f"<span style='font-size:0.75rem; color:#38bdf8;'>Source: {'Uploaded CSV' if is_uploaded_dataset else 'GEE 30m Multi-Sensor Dataset'}</span>",
+                unsafe_allow_html=True
+            )
 
     # C. EXTERNAL LOADING PARAMETERS EXPANDER
     with st.expander("⚡ C. EXTERNAL LOADING PARAMETERS (Hydrological & Seismic Surcharge)", expanded=True):
@@ -785,20 +941,21 @@ elif nav_page == "2. Input Parameters":
 # ==========================================
 elif nav_page == "3. GIS Risk Map":
 
-    st.markdown("""
+    st.markdown(f"""
     <div class="hero-container">
         <h1 class="hero-title">GEOGRAPHICAL <span class="cyan">GIS RISK MAP</span></h1>
         <div class="hero-tagline">Spatial Terrain Visualization & Feature Query</div>
-        <div class="hero-subtitle">Interactive cartography mapping 12,409 verified Himachal Pradesh dataset points.</div>
+        <div class="hero-subtitle">Interactive cartography mapping {active_record_count:,} {active_city} dataset points.</div>
     </div>
     """, unsafe_allow_html=True)
 
     fig_full = create_gis_risk_map(
-        df_modelling,
+        active_dataset,
         st.session_state.selected_lat,
         st.session_state.selected_lon,
         selected_probability_pct=ai_res['percentage'],
-        sample_limit=2200
+        sample_limit=2200,
+        uploaded_dataset=is_uploaded_dataset
     )
     fig_full.update_layout(height=640)
     st.plotly_chart(fig_full, use_container_width=True)
@@ -822,13 +979,19 @@ elif nav_page == "3. GIS Risk Map":
 # ==========================================
 elif nav_page == "4. AI Prediction":
 
-    st.markdown("""
+    st.markdown(f"""
     <div class="hero-container">
         <h1 class="hero-title">AI MACHINE-LEARNING <span class="cyan">PREDICTION</span></h1>
         <div class="hero-tagline">Statistical Landslide Susceptibility Probability</div>
-        <div class="hero-subtitle">Inference output generated directly by the trained XGBoost / Random Forest classifier.</div>
+        <div class="hero-subtitle">Inference output generated directly by the trained XGBoost / Random Forest classifier for the selected {active_city} dataset row.</div>
     </div>
     """, unsafe_allow_html=True)
+    if is_uploaded_dataset:
+        st.warning(
+            "This model was trained on Himachal Pradesh data and has not been validated "
+            "for the uploaded city. Treat this prediction as exploratory, not as a locally "
+            "calibrated risk assessment."
+        )
 
     st.markdown(f"""
     <div class="section-card" style="text-align:center; padding:36px;">
@@ -983,13 +1146,16 @@ elif nav_page == "7. Historical Landslide Analysis":
     """, unsafe_allow_html=True)
 
     rad_in = st.slider("Historical Query Radius (km)", 2.0, 50.0, 15.0, 1.0)
-    h_query = query_nearby_historical_landslides(st.session_state.selected_lat, st.session_state.selected_lon, df_inventory, radius_km=rad_in)
-    st.markdown(f"**Query Result:** {h_query['message']}")
-
-    if h_query['count'] > 0:
-        st.dataframe(pd.DataFrame(h_query['records'])[['sno', 'slide_name', 'district', 'material', 'movement', 'year', 'distance_km']], use_container_width=True)
+    if is_uploaded_dataset:
+        st.info("The available GSI inventory covers Himachal Pradesh, not this uploaded city dataset.")
     else:
-        st.info("No historical landslide record found in the available inventory within this radius.")
+        h_query = query_nearby_historical_landslides(st.session_state.selected_lat, st.session_state.selected_lon, df_inventory, radius_km=rad_in)
+        st.markdown(f"**Query Result:** {h_query['message']}")
+
+        if h_query['count'] > 0:
+            st.dataframe(pd.DataFrame(h_query['records'])[['sno', 'slide_name', 'district', 'material', 'movement', 'year', 'distance_km']], use_container_width=True)
+        else:
+            st.info("No historical landslide record found in the available inventory within this radius.")
 
 
 # ==========================================
@@ -1111,6 +1277,12 @@ elif nav_page == "10. Model Performance":
         <div class="hero-subtitle">Comparing XGBoost, Random Forest, Extra Trees, and Logistic Regression on 12,409 real samples.</div>
     </div>
     """, unsafe_allow_html=True)
+    if is_uploaded_dataset:
+        st.info(
+            "These benchmark metrics and ROC/confusion-matrix plots come from the "
+            "original Himachal Pradesh test set. They are not recalculated from the "
+            "uploaded city CSV."
+        )
 
     comp = model_metadata.get('comparison', {})
     tbl_p = []
@@ -1157,34 +1329,52 @@ elif nav_page == "10. Model Performance":
 # ==========================================
 elif nav_page == "11. Dataset Information":
 
-    st.markdown("""
+    st.markdown(f"""
     <div class="hero-container">
         <h1 class="hero-title">DATASET INFORMATION & <span class="cyan">TRANSPARENCY</span></h1>
-        <div class="hero-tagline">Official Himachal Pradesh Geo-Environmental Dataset</div>
-        <div class="hero-subtitle">Complete data provenance, verified attribute definitions, and scientific methodology disclosures.</div>
+        <div class="hero-tagline">Active dataset: {active_city}</div>
+        <div class="hero-subtitle">Uploaded data is used as provided; the application does not replace missing measurements with sample values.</div>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("""
-    <div class="callout-alert" style="border-left:6px solid #f97316;">
-        <strong>CRITICAL SCIENTIFIC METHODOLOGY NOTE:</strong><br>
-        “The non-landslide samples in this dataset are pseudo-absence samples and should not be interpreted as confirmed stable ground.”
-    </div>
-    """, unsafe_allow_html=True)
+    if is_uploaded_dataset:
+        metrics = st.columns(3)
+        metrics[0].metric("Total records", f"{len(active_dataset):,}")
+        metrics[1].metric("Selected city", active_city)
+        metrics[2].metric("Available parameters", f"{len(uploaded_raw.columns):,}")
+        st.caption(
+            "Predictions use the existing model trained on Himachal Pradesh data. "
+            "Its performance is not validated for these uploaded cities; treat results as exploratory."
+        )
+        st.info(
+            "Engineering Factor of Safety and external-load scenarios use separately "
+            "editable inputs, not verified measurements from this CSV."
+        )
+        st.markdown("### Uploaded dataset preview")
+        st.dataframe(uploaded_raw.head(50), use_container_width=True, height=280)
+        st.markdown("### Available parameters")
+        st.write(", ".join(str(column) for column in uploaded_raw.columns))
+    else:
+        st.markdown("""
+        <div class="callout-alert" style="border-left:6px solid #f97316;">
+            <strong>CRITICAL SCIENTIFIC METHODOLOGY NOTE:</strong><br>
+            “The non-landslide samples in this dataset are pseudo-absence samples and should not be interpreted as confirmed stable ground.”
+        </div>
+        """, unsafe_allow_html=True)
 
-    d_info = get_dataset_inspection_summary()
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("Total Samples", f"{d_info['total_modeling_samples']:,}")
-    with c2:
-        st.metric("Landslide (Class 1)", f"{d_info['landslide_samples']:,}")
-    with c3:
-        st.metric("Pseudo-Absence (Class 0)", f"{d_info['non_landslide_samples']:,}")
-    with c4:
-        st.metric("GSI Inventory Records", f"{d_info['historical_inventory_count']:,}")
+        d_info = get_dataset_inspection_summary()
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Total Samples", f"{d_info['total_modeling_samples']:,}")
+        with c2:
+            st.metric("Landslide (Class 1)", f"{d_info['landslide_samples']:,}")
+        with c3:
+            st.metric("Pseudo-Absence (Class 0)", f"{d_info['non_landslide_samples']:,}")
+        with c4:
+            st.metric("GSI Inventory Records", f"{d_info['historical_inventory_count']:,}")
 
-    st.markdown("### Primary Dataset Preview (First 50 Rows)")
-    st.dataframe(df_modelling.head(50), use_container_width=True, height=280)
+        st.markdown("### Primary Dataset Preview (First 50 Rows)")
+        st.dataframe(active_dataset.head(50), use_container_width=True, height=280)
 
-    st.markdown("### Official Data Dictionary")
-    st.dataframe(load_data_dictionary(), use_container_width=True)
+        st.markdown("### Official Data Dictionary")
+        st.dataframe(load_data_dictionary(), use_container_width=True)

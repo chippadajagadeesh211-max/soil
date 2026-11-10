@@ -37,26 +37,37 @@ def create_gis_risk_map(
     selected_lat: float,
     selected_lon: float,
     selected_probability_pct: float = None,
-    sample_limit: int = 1400
+    sample_limit: int = 1400,
+    uploaded_dataset: bool = False
 ) -> go.Figure:
     """
-    Builds a high-performance interactive Mapbox visualization for Himachal Pradesh.
+    Builds an interactive map for the active dataset.
     """
-    # Balanced subsampling for rapid 60fps rendering in the browser
-    df_landslides = df_all[df_all['class'] == 1]
-    df_pseudo = df_all[df_all['class'] == 0]
+    plot_df = df_all.dropna(subset=['latitude', 'longitude']).copy()
+    if len(plot_df) > sample_limit:
+        plot_df = plot_df.sample(n=sample_limit, random_state=42)
 
-    n_ls = min(len(df_landslides), sample_limit // 2)
-    n_ps = min(len(df_pseudo), sample_limit // 2)
+    if 'class' in plot_df:
+        class_labels = (
+            {1: 'Uploaded class 1', 0: 'Uploaded class 0'}
+            if uploaded_dataset else
+            {1: 'Landslide (Historical Failure)', 0: 'Pseudo-absence (Reference Terrain)'}
+        )
+        plot_df['Inventory Class'] = plot_df['class'].map(class_labels).fillna('Unclassified')
+    else:
+        plot_df['Inventory Class'] = 'Uploaded dataset sample' if uploaded_dataset else 'Dataset sample'
 
-    sub_ls = df_landslides.sample(n=n_ls, random_state=42)
-    sub_ps = df_pseudo.sample(n=n_ps, random_state=42)
-
-    plot_df = pd.concat([sub_ls, sub_ps]).copy()
-    plot_df['Inventory Class'] = plot_df['class'].map({
-        1: 'Landslide (Historical Failure)',
-        0: 'Pseudo-absence (Reference Terrain)'
-    })
+    hover_data = {
+        column: format_spec
+        for column, format_spec in (
+            ('slope_deg', ':.1f'),
+            ('elevation_m', ':.0f'),
+            ('Rainfall_z', ':.2f'),
+            ('NDVI_z', ':.2f'),
+            ('lulc_name', True)
+        )
+        if column in plot_df.columns
+    }
 
     fig = px.scatter_mapbox(
         plot_df,
@@ -65,16 +76,15 @@ def create_gis_risk_map(
         color="Inventory Class",
         color_discrete_map={
             'Landslide (Historical Failure)': '#e11d48',
-            'Pseudo-absence (Reference Terrain)': '#0284c7'
+            'Pseudo-absence (Reference Terrain)': '#0284c7',
+            'Uploaded class 1': '#e11d48',
+            'Uploaded class 0': '#0284c7',
+            'Uploaded dataset sample': '#0284c7',
+            'Dataset sample': '#0284c7',
+            'Unclassified': '#64748b'
         },
-        hover_data={
-            'slope_deg': ':.1f',
-            'elevation_m': ':.0f',
-            'Rainfall_z': ':.2f',
-            'NDVI_z': ':.2f',
-            'lulc_name': True
-        },
-        zoom=7.3,
+        hover_data=hover_data,
+        zoom=8,
         center={"lat": float(selected_lat), "lon": float(selected_lon)},
         mapbox_style="carto-positron",
         opacity=0.72,
